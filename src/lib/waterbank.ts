@@ -48,6 +48,7 @@ export const WELLS: Well[] = [
   { id: "CHAM-07-04B", name: "Bondville (E. Mahomet)", base: 41.5, qaqc: false },
   { id: "CHAM-07-01A", name: "Zahnd Pond / Mahomet", base: 44.0, qaqc: false },
   { id: "CHAM-08-02A", name: "Middle Fork / Mahomet", base: 52.3, qaqc: false },
+  { id: "CHAM-08-03A", name: "South of Ludlow / Mahomet", base: 48.9, qaqc: false },
   { id: "CHAM-08-08A", name: "Lake of the Woods / Mahomet", base: 38.7, qaqc: false },
   { id: "MTH-22S", name: "N. Mahomet (McLean–Tazewell)", base: 67.9, qaqc: true },
 ];
@@ -125,13 +126,20 @@ export const meterSeries: MeterSeries[] = FARMS.map((f) => {
 // ---- helpers ----
 export const today = <T,>(arr: T[]): T => arr[arr.length - 1];
 
+// ---- uncertainty (demo): every [C]/[E] figure carries a visible ± band ----
+export const UNC_ETC = 0.12;      // ET0 method (Hargreaves-Samani) + Kc (FAO-56)
+export const UNC_NEED = 0.15;     // crop-water requirement propagated
+export const UNC_SCENARIO = 0.20; // new high-demand user estimate
+
 export function cropRequirement(farm: Farm) {
   const et0 = today(weather.et0);
   const etc = +(et0 * farm.kc).toFixed(3);
+  const etcPm = +(etc * UNC_ETC).toFixed(3);
   const effRain = +Math.min(today(weather.rain) * 0.8, etc).toFixed(3);
   const netIn = Math.max(etc - effRain, 0);
   const gal = Math.round(netIn * farm.acres * GAL_PER_ACRE_INCH);
-  return { etc, effRain, gal };
+  const galPm = Math.round(gal * UNC_NEED);
+  return { etc, etcPm, effRain, gal, galPm };
 }
 
 export function gwTrend(days = 7) {
@@ -140,33 +148,48 @@ export function gwTrend(days = 7) {
   return +(deltas.reduce((a, b) => a + b, 0) / deltas.length).toFixed(2);
 }
 
-export interface Stream { name: string; value: string; support: boolean; tag: string; }
+// Each stream either CORROBORATES a claim, CONFLICTS with it, or is SILENT.
+// Streams do NOT vote on one question — they measure different things.
+export type StreamStatus = "corroborate" | "conflict" | "silent";
+export interface Stream { name: string; value: string; status: StreamStatus; tag: string; }
 export interface Consensus {
-  req: number; etc: number; effRain: number; applied: number; trend: number;
-  streams: Stream[]; supporting: number; total: number; conflict: boolean;
+  req: number; reqPm: number; etc: number; etcPm: number; effRain: number; applied: number; trend: number;
+  streams: Stream[]; corroborate: number; conflictN: number; silent: number; total: number; conflict: boolean;
 }
 
 export function consensusForFarm(farm: Farm): Consensus {
-  const { etc, effRain, gal: req } = cropRequirement(farm);
+  const { etc, etcPm, effRain, gal: req, galPm } = cropRequirement(farm);
   const applied = today(meterSeries.find((m) => m.farm === farm.id)!.gallons);
   const trend = gwTrend();
   const rain = today(weather.rain);
+  // Claim under test: "reduce the next irrigation cycle for this farm."
   const streams: Stream[] = [
-    { name: "Groundwater trend", tag: "M", value: trend > 0.05 ? "Falling / stressed" : "Stable", support: trend > 0.05 },
-    { name: "Farm meter vs need", tag: "M/C", value: `applied ${applied.toLocaleString()} vs need ${req.toLocaleString()}`, support: applied > req * 1.05 },
-    { name: "Recent precipitation", tag: "M", value: `${rain.toFixed(2)} in`, support: rain < 0.1 },
-    { name: "Crop requirement", tag: "C", value: `${req.toLocaleString()} gal need`, support: applied > req },
+    { name: "Groundwater trend", tag: "M",
+      value: trend > 0.05 ? "Falling / stressed" : "Stable / recovering",
+      status: trend > 0.05 ? "corroborate" : "silent" },
+    { name: "Farm meter (applied)", tag: "M",
+      value: `${applied.toLocaleString()} gal applied today`,
+      status: applied > req * 1.05 ? "corroborate" : applied < req * 0.95 ? "conflict" : "silent" },
+    { name: "Recent precipitation", tag: "M",
+      value: `${rain.toFixed(2)} in (24h)`,
+      status: rain > 0.15 ? "corroborate" : "silent" },
+    { name: "Crop requirement", tag: "C",
+      value: `${req.toLocaleString()} ± ${galPm.toLocaleString()} gal needed`,
+      status: req < applied * 0.95 ? "corroborate" : req > applied * 1.05 ? "conflict" : "silent" },
   ];
-  const supporting = streams.filter((s) => s.support).length;
-  const conflict = applied > req * 1.05 && rain > 0.4;
-  return { req, etc, effRain, applied, trend, streams, supporting, total: streams.length, conflict };
+  const corroborate = streams.filter((s) => s.status === "corroborate").length;
+  const conflictN = streams.filter((s) => s.status === "conflict").length;
+  const silent = streams.filter((s) => s.status === "silent").length;
+  // Conflict surfaces only when independent streams DISAGREE (some corroborate, some contradict).
+  const conflict = corroborate > 0 && conflictN > 0;
+  return { req, reqPm: galPm, etc, etcPm, effRain, applied, trend, streams, corroborate, conflictN, silent, total: streams.length, conflict };
 }
 
 export function recommendation(c: Consensus): { text: string; pct: number | null } {
   if (c.conflict) return { text: "CONFLICT DETECTED — HUMAN REVIEW REQUIRED", pct: null };
-  if (c.supporting >= 3 && c.applied > c.req)
+  if (c.corroborate >= 2 && c.applied > c.req)
     return { text: "Consider reducing next application by ~15%", pct: 15 };
-  return { text: "Hold — evidence does not support reduction", pct: 0 };
+  return { text: "Hold — no independent stream corroborates a reduction", pct: 0 };
 }
 
 export interface PolicyRule {

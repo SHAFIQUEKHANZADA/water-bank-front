@@ -21,11 +21,12 @@ function Counter({ value, decimals = 0, suffix = "", prefix = "" }: { value: num
   const shown = decimals > 0 ? v.toFixed(decimals) : Math.round(v).toLocaleString();
   return <>{prefix}{shown}{suffix}</>;
 }
-function Card({ label, tag, accent, children }: { label: string; tag?: TagT; accent: string; children: React.ReactNode }) {
+function Card({ label, tag, accent, sub, children }: { label: string; tag?: TagT; accent: string; sub?: string; children: React.ReactNode }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md" style={{ borderTop: `3px solid ${accent}` }}>
       <div className="flex items-center gap-1 text-[10.5px] font-semibold uppercase tracking-wide text-slate-500">{label} {tag && <Tag t={tag} />}</div>
       <div className="mt-1.5 text-2xl font-extrabold text-slate-900">{children}</div>
+      {sub && <div className="mt-0.5 text-[11px] font-medium text-slate-400">{sub}</div>}
     </div>
   );
 }
@@ -71,8 +72,9 @@ export default function Dashboard() {
   const gwChg = gwTrend();
   const pumpToday = meterSeries.reduce((a, m) => a + today(m.gallons), 0);
   const totalReq = FARMS.reduce((a, f) => a + cropRequirement(f).gal, 0);
+  const totalReqPm = FARMS.reduce((a, f) => a + cropRequirement(f).galPm, 0);
   const alerts = meterSeries.filter((m) => today(m.anomaly)).length;
-  const avgSupport = FARMS.reduce((a, f) => a + consByFarm[f.id].supporting, 0) / FARMS.length;
+  const avgCorrob = FARMS.reduce((a, f) => a + consByFarm[f.id].corroborate, 0) / FARMS.length;
 
   function download(name: string, text: string, type = "text/plain") {
     const url = URL.createObjectURL(new Blob([text], { type }));
@@ -132,9 +134,9 @@ export default function Dashboard() {
             <Card label="Groundwater" tag="M" accent="#2563eb"><Counter value={gwNow} decimals={1} suffix=" ft" /></Card>
             <Card label="7-day change" tag="M" accent="#2563eb"><Counter value={gwChg} decimals={2} suffix=" ft" prefix={gwChg >= 0 ? "+" : ""} /></Card>
             <Card label="Pumping today" tag="M" accent="#2563eb"><Counter value={pumpToday} suffix=" gal" /></Card>
-            <Card label="Est. crop need" tag="C" accent="#0d9488"><Counter value={totalReq} suffix=" gal" /></Card>
+            <Card label="Est. crop need" tag="C" accent="#0d9488" sub={`± ${totalReqPm.toLocaleString()} gal (±15%)`}><Counter value={totalReq} suffix=" gal" /></Card>
             <Card label="Rainfall 24h" tag="M" accent="#2563eb"><Counter value={today(weather.rain)} decimals={2} suffix=" in" /></Card>
-            <Card label="Evidence agreement" accent="#7c3aed"><Counter value={avgSupport} decimals={1} suffix="/4" /></Card>
+            <Card label="Streams corroborating" accent="#7c3aed" sub="avg / farm (of 4)"><Counter value={avgCorrob} decimals={1} suffix="/4" /></Card>
             <Card label="Active alerts" accent={alerts ? "#e11d48" : "#16a34a"}><Counter value={alerts} /></Card>
           </div>
 
@@ -144,7 +146,7 @@ export default function Dashboard() {
                 <div className={panel}>
                   <h2 className="mb-1 font-semibold text-slate-900">Groundwater — ISWS monitoring wells (real IDs) <Tag t="M" /></h2>
                   <p className="mb-3 text-xs text-slate-500">NOAA station: {NOAA_STATION} · hover the chart for values</p>
-                  <LineChart invertBand height={210} labels={DATES} unit=" ft" series={wellSeries.map((w, i) => ({ name: w.id + (w.qaqc ? " ⚠QA/QC" : ""), data: w.depth, color: ["#2563eb", "#0d9488", "#d97706", "#db2777", "#7c3aed"][i % 5] }))} />
+                  <LineChart invertBand height={210} labels={DATES} unit=" ft" series={wellSeries.map((w, i) => ({ name: w.id + (w.qaqc ? " ⚠QA/QC" : ""), data: w.depth, color: ["#2563eb", "#0d9488", "#d97706", "#db2777", "#7c3aed", "#0891b2"][i % 6] }))} />
                 </div>
                 <div className="grid gap-4 lg:grid-cols-2">
                   <div className={panel}>
@@ -170,11 +172,11 @@ export default function Dashboard() {
                       <div className="flex flex-wrap items-start justify-between gap-4">
                         <div className="min-w-[280px] flex-1">
                           <h3 className="text-lg font-bold text-slate-900">{f.id} — {f.crop} ({f.stage}), {f.acres} ac</h3>
-                          <p className="mt-1 text-sm text-slate-600">Meter today <Tag t="M" /> <b className="text-slate-900">{c.applied.toLocaleString()} gal</b> · Crop need <Tag t="C" /> <b className="text-slate-900">{c.req.toLocaleString()} gal</b> · ETc <Tag t="C" /> {c.etc} in</p>
+                          <p className="mt-1 text-sm text-slate-600">Meter today <Tag t="M" /> <b className="text-slate-900">{c.applied.toLocaleString()} gal</b> · Crop need <Tag t="C" /> <b className="text-slate-900">{c.req.toLocaleString()} ± {c.reqPm.toLocaleString()} gal</b> · ETc <Tag t="C" /> {c.etc} ± {c.etcPm} in</p>
                           {c.conflict ? (
-                            <p className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">🟥 CONFLICT DETECTED — HUMAN REVIEW REQUIRED (meter high but recent rain wets soil)</p>
+                            <p className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">🟥 CONFLICT DETECTED — HUMAN REVIEW REQUIRED (independent streams disagree)</p>
                           ) : (
-                            <p className="mt-2 text-sm text-slate-600">Evidence agreement: <b className="text-slate-900">{c.supporting} of {c.total} sources</b> support the claim</p>
+                            <p className="mt-2 text-sm text-slate-600">Evidence: <b className="text-slate-900">{c.corroborate} corroborate</b> · {c.conflictN} conflict · {c.silent} silent <span className="text-slate-400">(of {c.total} independent streams)</span></p>
                           )}
                           <p className="mt-2 text-sm"><Tag t="R" /> <b className="text-purple-700">{rec.text}</b> <span className="text-slate-400">(DEMO POLICY RULE / TEST SCENARIO — not scientific truth)</span></p>
                         </div>
@@ -202,11 +204,17 @@ export default function Dashboard() {
                   <select value={selFarm} onChange={(e) => setSelFarm(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900">{FARMS.map((f) => <option key={f.id}>{f.id}</option>)}</select>
                   <div className={panel}>
                     <h3 className="text-lg font-semibold text-slate-900">Claim: <i>reduce next irrigation for {selFarm}?</i></h3>
-                    <p className="mt-1 text-sm text-slate-600">Consensus: <b className="text-slate-900">{c.supporting} of {c.total} independent streams support</b> — {c.conflict ? <span className="font-semibold text-red-600">🟥 CONFLICT — human review</span> : <span className="text-emerald-600">🟩 no conflict</span>}</p>
+                    <p className="mt-1 text-sm text-slate-600">
+                      {c.corroborate > 0
+                        ? <>Evidence supports this recommendation — <b className="text-slate-900">{c.corroborate} independent stream{c.corroborate > 1 ? "s" : ""} corroborate</b>, {c.conflictN} conflict, {c.silent} silent.</>
+                        : <>No independent stream corroborates a reduction — the streams are <b className="text-slate-900">silent</b> on this claim (they are not voting against it), {c.conflictN} conflict.</>}
+                      {" "}{c.conflict ? <span className="font-semibold text-red-600">🟥 CONFLICT — human review</span> : <span className="text-emerald-600">🟩 no conflict</span>}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-400">Guardian does not average or tally votes — each stream corroborates, conflicts, or stays silent on this specific claim.</p>
                     <div className="mt-3 space-y-2">
                       {c.streams.map((s) => (
                         <details key={s.name} className="group rounded-lg border border-slate-200 bg-slate-50 p-3 transition hover:border-slate-300">
-                          <summary className="cursor-pointer text-sm text-slate-700">{s.support ? "✅" : "⬜"} <b>{s.name}</b> [{s.tag}] — {s.value}</summary>
+                          <summary className="cursor-pointer text-sm text-slate-700">{s.status === "corroborate" ? "✅ corroborates" : s.status === "conflict" ? "🟥 conflicts" : "➖ silent"} · <b>{s.name}</b> [{s.tag}] — {s.value}</summary>
                           <div className="mt-2 text-xs text-slate-500"><b>Where did this come from?</b>{" "}
                             {s.name.includes("Groundwater") && `ISWS Groundwater Monitoring Network (real well IDs). 7-day mean change: ${c.trend >= 0 ? "+" : ""}${c.trend} ft. Class: [M].`}
                             {s.name.includes("meter") && "Farm flow meter — SIMULATED, DEMO ONLY. Applied vs calculated need (ETc × acres × 27,150). [M]/[C]."}
@@ -243,8 +251,8 @@ export default function Dashboard() {
                     </label>
                     <div className="mt-3 grid gap-3 sm:grid-cols-3">
                       <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">Basin today <Tag t="M" /></div><div className="text-lg font-bold text-slate-900">{pumpToday.toLocaleString()}</div></div>
-                      <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">+ New user <Tag t="E" /></div><div className="text-lg font-bold text-slate-900">{dc.toLocaleString()}</div></div>
-                      <div className="rounded-lg bg-blue-50 p-3 ring-1 ring-inset ring-blue-200"><div className="text-xs text-blue-700">= Cumulative</div><div className="text-lg font-bold text-slate-900">{total.toLocaleString()}</div></div>
+                      <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">+ New user <Tag t="E" /></div><div className="text-lg font-bold text-slate-900">{dc.toLocaleString()}</div><div className="text-[11px] text-slate-400">± {Math.round(dc * 0.2).toLocaleString()} (±20%)</div></div>
+                      <div className="rounded-lg bg-blue-50 p-3 ring-1 ring-inset ring-blue-200"><div className="text-xs text-blue-700">= Cumulative</div><div className="text-lg font-bold text-slate-900">{total.toLocaleString()}</div><div className="text-[11px] text-blue-700/70">± {Math.round(dc * 0.2).toLocaleString()}</div></div>
                     </div>
                     <div className="mt-3"><LineChart height={160} area unit=" gal" series={[{ name: "baseline", data: Array(30).fill(pumpToday), color: "#2563eb" }, { name: "with new user", data: Array(30).fill(total), color: "#db2777" }]} /></div>
                   </div>
@@ -284,7 +292,7 @@ export default function Dashboard() {
             )}
 
             {tab === "Export" && (() => {
-              const rows = FARMS.map((f) => { const c = consByFarm[f.id]; const rec = recommendation(c); return { farm: f.id, crop: f.crop, acres: f.acres, applied_gal_M: c.applied, crop_need_gal_C: c.req, etc_in_C: c.etc, consensus: `${c.supporting}/${c.total}`, conflict: c.conflict, recommendation_R: rec.text, farmer_decision: decisions[f.id] ?? "—", verified_V: verified[f.id] ? "yes" : "NOT VERIFIED" }; });
+              const rows = FARMS.map((f) => { const c = consByFarm[f.id]; const rec = recommendation(c); return { farm: f.id, crop: f.crop, acres: f.acres, applied_gal_M: c.applied, crop_need_gal_C: c.req, crop_need_pm_gal: c.reqPm, etc_in_C: c.etc, etc_pm_in: c.etcPm, consensus: `${c.corroborate} corroborate / ${c.conflictN} conflict / ${c.silent} silent`, conflict: c.conflict, recommendation_R: rec.text, farmer_decision: decisions[f.id] ?? "—", verified_V: verified[f.id] ? "yes" : "NOT VERIFIED" }; });
               const csv = [Object.keys(rows[0]).join(","), ...rows.map((r) => Object.values(r).map((v) => `"${v}"`).join(","))].join("\n");
               const report = `GUARDIAN WATER BANK — RESEARCH PROTOTYPE\n${"=".repeat(60)}\nGenerated: ${TODAY} 08:45  ·  Mahomet Aquifer, E-Central IL\nData sources: ISWS Groundwater Monitoring Network (wells ${WELLS.map((w) => w.id).join(", ")}); NOAA ${NOAA_STATION}; SIMULATED farm meters (DEMO ONLY).\nFormulas: ETc = ET0(Hargreaves-Samani)[C] × Kc(FAO-56); gal = net_in × acres × 27,150.\n\n${rows.map((r) => `${r.farm}: applied ${r.applied_gal_M} [M] | need ${r.crop_need_gal_C} [C] | consensus ${r.consensus} | ${r.recommendation_R} [R] | decision ${r.farmer_decision} | ${r.verified_V}`).join("\n")}\n\nAudit chain records: ${ledger.length} (SHA-256, versioned).\nFor demonstration and scientific review only. No operational, regulatory, hydrologic, agricultural, or legal conclusion is asserted by this prototype.`;
               return (
