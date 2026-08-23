@@ -127,8 +127,8 @@ export const meterSeries: MeterSeries[] = FARMS.map((f) => {
 export const today = <T,>(arr: T[]): T => arr[arr.length - 1];
 
 // ---- uncertainty (demo): every [C]/[E] figure carries a visible ± band ----
+// NOT a flat rate — the crop-need band is PROPAGATED from the ETc error below.
 export const UNC_ETC = 0.12;      // ET0 method (Hargreaves-Samani) + Kc (FAO-56)
-export const UNC_NEED = 0.15;     // crop-water requirement propagated
 export const UNC_SCENARIO = 0.20; // new high-demand user estimate
 
 export function cropRequirement(farm: Farm) {
@@ -138,7 +138,11 @@ export function cropRequirement(farm: Farm) {
   const effRain = +Math.min(today(weather.rain) * 0.8, etc).toFixed(3);
   const netIn = Math.max(etc - effRain, 0);
   const gal = Math.round(netIn * farm.acres * GAL_PER_ACRE_INCH);
-  const galPm = Math.round(gal * UNC_NEED);
+  // Uncertainty propagated from the ETc error (etcPm), carried through the same
+  // acre-inch conversion — so the crop-need band is CONSISTENT with ETc's ±12%,
+  // not an independent hardcoded rate. (Relative % rises where effective rain
+  // is subtracted, which is the correct behaviour for a difference.)
+  const galPm = Math.round(etcPm * farm.acres * GAL_PER_ACRE_INCH);
   return { etc, etcPm, effRain, gal, galPm };
 }
 

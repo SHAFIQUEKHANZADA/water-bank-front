@@ -12,9 +12,13 @@ function Tag({ t }: { t: TagT }) {
   return <span title={TAG_MEANING[t]} className="inline-block rounded px-1.5 py-0.5 text-[11px] font-bold text-white align-middle" style={{ background: TAG_COLORS[t] }}>[{t}]</span>;
 }
 function Counter({ value, decimals = 0, suffix = "", prefix = "" }: { value: number; decimals?: number; suffix?: string; prefix?: string }) {
-  const [v, setV] = useState(0);
+  // Seed with the real value so the server-rendered / pre-hydration HTML shows
+  // the true number (a scraper or slow hydrate never sees a "0" placeholder);
+  // the count-up animation is a client-only enhancement that runs after mount.
+  const [v, setV] = useState(value);
   useEffect(() => {
     let raf = 0; const start = performance.now(), dur = 700;
+    setV(0);
     const tick = (t: number) => { const p = Math.min((t - start) / dur, 1); setV(value * (1 - Math.pow(1 - p, 3))); if (p < 1) raf = requestAnimationFrame(tick); };
     raf = requestAnimationFrame(tick); return () => cancelAnimationFrame(raf);
   }, [value]);
@@ -74,7 +78,7 @@ export default function Dashboard() {
   const totalReq = FARMS.reduce((a, f) => a + cropRequirement(f).gal, 0);
   const totalReqPm = FARMS.reduce((a, f) => a + cropRequirement(f).galPm, 0);
   const alerts = meterSeries.filter((m) => today(m.anomaly)).length;
-  const avgCorrob = FARMS.reduce((a, f) => a + consByFarm[f.id].corroborate, 0) / FARMS.length;
+  const conflictsFlagged = FARMS.filter((f) => consByFarm[f.id].conflict).length;
 
   function download(name: string, text: string, type = "text/plain") {
     const url = URL.createObjectURL(new Blob([text], { type }));
@@ -134,9 +138,9 @@ export default function Dashboard() {
             <Card label="Groundwater" tag="M" accent="#2563eb"><Counter value={gwNow} decimals={1} suffix=" ft" /></Card>
             <Card label="7-day change" tag="M" accent="#2563eb"><Counter value={gwChg} decimals={2} suffix=" ft" prefix={gwChg >= 0 ? "+" : ""} /></Card>
             <Card label="Pumping today" tag="M" accent="#2563eb"><Counter value={pumpToday} suffix=" gal" /></Card>
-            <Card label="Est. crop need" tag="C" accent="#0d9488" sub={`± ${totalReqPm.toLocaleString()} gal (±15%)`}><Counter value={totalReq} suffix=" gal" /></Card>
+            <Card label="Est. crop need" tag="C" accent="#0d9488" sub={`± ${totalReqPm.toLocaleString()} gal · from ETc ±12%`}><Counter value={totalReq} suffix=" gal" /></Card>
             <Card label="Rainfall 24h" tag="M" accent="#2563eb"><Counter value={today(weather.rain)} decimals={2} suffix=" in" /></Card>
-            <Card label="Streams corroborating" accent="#7c3aed" sub="avg / farm (of 4)"><Counter value={avgCorrob} decimals={1} suffix="/4" /></Card>
+            <Card label="Conflicts to review" accent={conflictsFlagged ? "#d97706" : "#16a34a"} sub="claims where streams disagree"><Counter value={conflictsFlagged} /></Card>
             <Card label="Active alerts" accent={alerts ? "#e11d48" : "#16a34a"}><Counter value={alerts} /></Card>
           </div>
 
@@ -207,8 +211,14 @@ export default function Dashboard() {
                     <p className="mt-1 text-sm text-slate-600">
                       {c.corroborate > 0
                         ? <>Evidence supports this recommendation — <b className="text-slate-900">{c.corroborate} independent stream{c.corroborate > 1 ? "s" : ""} corroborate</b>, {c.conflictN} conflict, {c.silent} silent.</>
-                        : <>No independent stream corroborates a reduction — the streams are <b className="text-slate-900">silent</b> on this claim (they are not voting against it), {c.conflictN} conflict.</>}
-                      {" "}{c.conflict ? <span className="font-semibold text-red-600">🟥 CONFLICT — human review</span> : <span className="text-emerald-600">🟩 no conflict</span>}
+                        : c.conflictN > 0
+                          ? <>No stream corroborates a reduction, and <b className="text-slate-900">{c.conflictN} actively contradict{c.conflictN > 1 ? "" : "s"} it</b> — recommendation is to hold. {c.silent} silent.</>
+                          : <>No independent stream corroborates a reduction — the streams are <b className="text-slate-900">silent</b> on this claim (not voting against it).</>}
+                      {" "}{c.conflict
+                        ? <span className="font-semibold text-red-600">🟥 CONFLICT — human review</span>
+                        : c.conflictN > 0
+                          ? <span className="font-semibold text-amber-600">🟧 {c.conflictN} stream{c.conflictN > 1 ? "s" : ""} contradict — reduction not supported</span>
+                          : <span className="text-emerald-600">🟩 no conflict</span>}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">Guardian does not average or tally votes — each stream corroborates, conflicts, or stays silent on this specific claim.</p>
                     <div className="mt-3 space-y-2">
