@@ -27,8 +27,13 @@ export const sql =
   global.__wb_sql ??
   postgres(connectionString ?? "", {
     prepare: false,
+    // Serverless: each function instance handles one request at a time, so a
+    // single connection is right. max:5 opened up to 5 slots per invocation and
+    // exhausted the (shared, free-tier) Supabase pooler, hanging the page.
+    max: 1,
     idle_timeout: 20,
-    max: 5,
+    // Fail fast instead of hanging 40s+ if a pooler slot isn't available.
+    connect_timeout: 15,
   });
 
 if (process.env.NODE_ENV !== "production") global.__wb_sql = sql;

@@ -9,25 +9,27 @@ import { sql } from "./db";
 import type { WaterData, Well, Farm, WellSeries, Weather, MeterSeries, PolicyRule } from "./waterbank";
 
 export async function getWaterData(): Promise<WaterData> {
-  const [wellRows, farmRows, policyRows, wrRows, wxRows, mrRows] = await Promise.all([
-    sql<{ id: string; name: string; base_depth: string; qaqc: boolean }[]>`
-      select id, name, base_depth, qaqc from wells order by id`,
-    sql<{ id: string; crop: string; stage: string; acres: string; kc: string }[]>`
-      select id, crop, stage, acres, kc from farms order by id`,
-    sql<{ rule: string; type: string; trigger: string; source: string; effective: string; applies_to: string }[]>`
-      select rule, type, trigger, source, effective, applies_to from policy_rules order by rule`,
-    sql<{ well_id: string; d: string; depth_ft: string }[]>`
-      select well_id, reading_date::text as d, depth_ft from well_readings order by well_id, reading_date`,
-    // Bound weather to the readings window so real NOAA rows pulled for dates
-    // beyond the 90-day axis (e.g. the last few real days) don't misalign charts.
-    sql<{ d: string; tmax_f: string; tmin_f: string; rain_in: string; et0_in: string; rain_source: string }[]>`
-      select obs_date::text as d, tmax_f, tmin_f, rain_in, et0_in, rain_source
-      from weather_daily
-      where obs_date <= (select max(reading_date) from well_readings)
-      order by obs_date`,
-    sql<{ farm_id: string; d: string; gallons: string; anomaly: boolean }[]>`
-      select farm_id, reading_date::text as d, gallons, anomaly from meter_readings order by farm_id, reading_date`,
-  ]);
+  // Queries run SEQUENTIALLY on a single connection (db.ts uses max:1). Supabase's
+  // transaction pooler can't handle postgres.js pipelining multiple concurrent
+  // queries on one connection — Promise.all here hangs. Sequential is ~2s total
+  // and, with max:1, never exhausts the shared free-tier pooler.
+  const wellRows = await sql<{ id: string; name: string; base_depth: string; qaqc: boolean }[]>`
+    select id, name, base_depth, qaqc from wells order by id`;
+  const farmRows = await sql<{ id: string; crop: string; stage: string; acres: string; kc: string }[]>`
+    select id, crop, stage, acres, kc from farms order by id`;
+  const policyRows = await sql<{ rule: string; type: string; trigger: string; source: string; effective: string; applies_to: string }[]>`
+    select rule, type, trigger, source, effective, applies_to from policy_rules order by rule`;
+  const wrRows = await sql<{ well_id: string; d: string; depth_ft: string }[]>`
+    select well_id, reading_date::text as d, depth_ft from well_readings order by well_id, reading_date`;
+  // Bound weather to the readings window so real NOAA rows pulled for dates
+  // beyond the 90-day axis (e.g. the last few real days) don't misalign charts.
+  const wxRows = await sql<{ d: string; tmax_f: string; tmin_f: string; rain_in: string; et0_in: string; rain_source: string }[]>`
+    select obs_date::text as d, tmax_f, tmin_f, rain_in, et0_in, rain_source
+    from weather_daily
+    where obs_date <= (select max(reading_date) from well_readings)
+    order by obs_date`;
+  const mrRows = await sql<{ farm_id: string; d: string; gallons: string; anomaly: boolean }[]>`
+    select farm_id, reading_date::text as d, gallons, anomaly from meter_readings order by farm_id, reading_date`;
 
   const wells: Well[] = wellRows.map((w) => ({
     id: w.id, name: w.name, base: Number(w.base_depth), qaqc: w.qaqc,
