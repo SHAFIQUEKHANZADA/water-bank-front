@@ -1,10 +1,10 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { LineChart, BarChart } from "./Charts";
 import {
-  DATES, FARMS, WELLS, NOAA_STATION, TODAY, TAG_COLORS, TAG_MEANING, POLICY_RULES,
-  wellSeries, weather, meterSeries, consensusForFarm, recommendation, cropRequirement,
-  gwTrend, today, sha256, type Tag as TagT, type Consensus,
+  NOAA_STATION, TODAY, TAG_COLORS, TAG_MEANING,
+  consensusForFarm, recommendation, cropRequirement, gwTrend, today, sha256,
+  type Tag as TagT, type Consensus, type WaterData,
 } from "@/lib/waterbank";
 
 /* ---------- atoms ---------- */
@@ -35,10 +35,58 @@ function Card({ label, tag, accent, sub, children }: { label: string; tag?: TagT
   );
 }
 
+/* ---------- icons (inline SVG, single consistent line set) ---------- */
+const ICONS: Record<string, React.ReactNode> = {
+  overview: <><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>,
+  farms: <><rect x="8" y="2" width="8" height="4" rx="1" /><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" /><path d="M12 11h4M12 16h4M8 11h.01M8 16h.01" /></>,
+  evidence: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="m9 12 2 2 4-4" /></>,
+  whatif: <><line x1="4" x2="4" y1="21" y2="14" /><line x1="4" x2="4" y1="10" y2="3" /><line x1="12" x2="12" y1="21" y2="12" /><line x1="12" x2="12" y1="8" y2="3" /><line x1="20" x2="20" y1="21" y2="16" /><line x1="20" x2="20" y1="12" y2="3" /><line x1="1" x2="7" y1="14" y2="14" /><line x1="9" x2="15" y1="8" y2="8" /><line x1="17" x2="23" y1="16" y2="16" /></>,
+  policy: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" /></>,
+  ledger: <><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></>,
+  export: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" /></>,
+  reset: <><polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" /></>,
+  droplet: <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" />,
+  warning: <><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" x2="12" y1="9" y2="13" /><line x1="12" x2="12.01" y1="17" y2="17" /></>,
+  check: <polyline points="20 6 9 17 4 12" />,
+  download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" /></>,
+};
+function Icon({ name, className = "h-5 w-5" }: { name: keyof typeof ICONS | string; className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.75} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden>
+      {ICONS[name]}
+    </svg>
+  );
+}
+// small colored status dot for stream corroborate/conflict/silent
+function Dot({ color }: { color: string }) {
+  return <span className="inline-block h-2 w-2 shrink-0 rounded-full align-middle" style={{ background: color }} />;
+}
+
 interface LedgerRow { version: number; timestamp: string; actor: string; source: string; action: string; ev: string; value: string; decision: string; prev: string; hash: string; }
+
+// DB ledger entry (from /api/ledger) → the display row the table renders.
+const GENESIS_HASH = "0".repeat(64);
+interface DbEntry { seq: string | number; ts: string; entry_type: string; tag: string; subject: string; payload: Record<string, unknown> | null; actor: string; prev_hash: string; hash: string; }
+function mapEntry(e: DbEntry): LedgerRow {
+  const p = e.payload ?? {};
+  const ts = typeof e.ts === "string" ? e.ts : "";
+  const str = (v: unknown) => (v == null ? "" : String(v));
+  return {
+    version: Number(e.seq),
+    timestamp: ts ? `${ts.slice(0, 10)} ${ts.slice(11, 16)}` : "",
+    actor: e.actor,
+    source: str(p.source) || e.subject,
+    action: str(p.action) || e.entry_type,
+    ev: e.tag,
+    value: str(p.value ?? p.note),
+    decision: str(p.decision),
+    prev: e.prev_hash === GENESIS_HASH ? "GENESIS" : String(e.prev_hash).slice(0, 14) + "…",
+    hash: e.hash,
+  };
+}
 const NAV = [
-  { id: "Overview", icon: "📊" }, { id: "Farms & Decisions", icon: "🚜" }, { id: "Guardian Evidence", icon: "🧠" },
-  { id: "What-if", icon: "🧪" }, { id: "Policy", icon: "📜" }, { id: "Audit Ledger", icon: "🔗" }, { id: "Export", icon: "📤" },
+  { id: "Overview", icon: "overview" }, { id: "Farms & Decisions", icon: "farms" }, { id: "Guardian Evidence", icon: "evidence" },
+  { id: "What-if", icon: "whatif" }, { id: "Policy", icon: "policy" }, { id: "Audit Ledger", icon: "ledger" }, { id: "Export", icon: "export" },
 ] as const;
 type TabId = (typeof NAV)[number]["id"];
 const DECISION_STYLE: Record<string, string> = {
@@ -46,7 +94,9 @@ const DECISION_STYLE: Record<string, string> = {
   Delay: "bg-amber-500 hover:bg-amber-400", Reject: "bg-rose-600 hover:bg-rose-500",
 };
 
-export default function Dashboard() {
+export default function Dashboard({ data }: { data: WaterData }) {
+  const { dates: DATES, farms: FARMS, wells: WELLS, wellSeries, weather, meterSeries, policyRules: POLICY_RULES } = data;
+
   const [tab, setTab] = useState<TabId>("Overview");
   const [decisions, setDecisions] = useState<Record<string, string>>({});
   const [verified, setVerified] = useState<Record<string, { reviewer: string; org: string; note: string; date: string; hash: string }>>({});
@@ -55,30 +105,48 @@ export default function Dashboard() {
   const [selFarm, setSelFarm] = useState(FARMS[0].id);
   const [rev, setRev] = useState({ reviewer: "", org: "", note: "" });
 
-  const consByFarm = useMemo(() => { const o: Record<string, Consensus> = {}; FARMS.forEach((f) => (o[f.id] = consensusForFarm(f))); return o; }, []);
+  const consByFarm = useMemo(() => { const o: Record<string, Consensus> = {}; FARMS.forEach((f) => (o[f.id] = consensusForFarm(f, data))); return o; }, [FARMS, data]);
 
-  async function addLedger(actor: string, source: string, action: string, ev: string, value: string, decision = "") {
-    const prev = ledger.length ? ledger[ledger.length - 1].hash : "GENESIS";
-    const hash = await sha256(`${prev}|${actor}|${source}|${action}|${ev}|${value}|${decision}`);
-    setLedger((L) => [...L, { version: L.length + 1, timestamp: `${TODAY} 08:45`, actor, source, action, ev, value, decision, prev: prev === "GENESIS" ? "GENESIS" : prev.slice(0, 14) + "…", hash }]);
+  // The ledger is authoritative in the DB (append-only, SHA-256 chained). Load
+  // it on mount and after every write — it persists across refreshes now.
+  const refetchLedger = useCallback(async () => {
+    try {
+      const r = await fetch("/api/ledger", { cache: "no-store" });
+      const j = await r.json();
+      const rows: LedgerRow[] = (j.entries ?? []).map(mapEntry).sort((a: LedgerRow, b: LedgerRow) => a.version - b.version);
+      setLedger(rows);
+    } catch { /* keep prior rows on transient failure */ }
+  }, []);
+  useEffect(() => { refetchLedger(); }, [refetchLedger]);
+
+  async function postEntry(body: Record<string, unknown>) {
+    await fetch("/api/ledger", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await refetchLedger();
   }
-  async function decide(farm: string, choice: string, recText: string) { setDecisions((d) => ({ ...d, [farm]: choice })); await addLedger("Farmer", farm, `Decision: ${choice}`, "R", recText, choice); }
+  async function decide(farm: string, choice: string, recText: string) {
+    setDecisions((d) => ({ ...d, [farm]: choice }));
+    await postEntry({ entry_type: "recommendation", tag: "R", subject: farm, actor: "Farmer", payload: { source: farm, action: `Decision: ${choice}`, value: recText, decision: choice } });
+  }
   async function verify(farm: string) {
     if (!rev.reviewer || !rev.org) return;
     const hash = (await sha256(`REVIEW|${farm}|${rev.reviewer}|${rev.org}|${rev.note}`)).slice(0, 16);
     setVerified((v) => ({ ...v, [farm]: { ...rev, date: TODAY, hash } }));
-    await addLedger(`${rev.reviewer} (${rev.org})`, farm, "Independent review", "V", "claim verified", rev.note || "—");
+    await postEntry({ entry_type: "review", tag: "V", subject: farm, actor: `${rev.reviewer} (${rev.org})`, payload: { source: farm, action: "Independent review", value: "claim verified", decision: rev.note || "—" } });
     setRev({ reviewer: "", org: "", note: "" });
   }
-  function resetDemo() { setDecisions({}); setVerified({}); setLedger([]); }
+  // The chain is immutable in the DB — "reset" only clears the local decision
+  // UI and reloads the true chain (it cannot delete history).
+  function resetDemo() { setDecisions({}); setVerified({}); refetchLedger(); }
 
   const gwNow = wellSeries.reduce((a, w) => a + today(w.depth), 0) / wellSeries.length;
-  const gwChg = gwTrend();
+  const gwChg = gwTrend(wellSeries);
   const pumpToday = meterSeries.reduce((a, m) => a + today(m.gallons), 0);
-  const totalReq = FARMS.reduce((a, f) => a + cropRequirement(f).gal, 0);
-  const totalReqPm = FARMS.reduce((a, f) => a + cropRequirement(f).galPm, 0);
+  const totalReq = FARMS.reduce((a, f) => a + cropRequirement(f, weather).gal, 0);
+  const totalReqPm = FARMS.reduce((a, f) => a + cropRequirement(f, weather).galPm, 0);
   const alerts = meterSeries.filter((m) => today(m.anomaly)).length;
   const conflictsFlagged = FARMS.filter((f) => consByFarm[f.id].conflict).length;
+  const noaaDays = weather.rainSource.filter((s) => s === "noaa").length;
+  const rainIsNoaa = today(weather.rainSource) === "noaa";
 
   function download(name: string, text: string, type = "text/plain") {
     const url = URL.createObjectURL(new Blob([text], { type }));
@@ -90,8 +158,8 @@ export default function Dashboard() {
     <div className="flex min-h-screen bg-slate-100 text-slate-700">
       {/* sidebar */}
       <aside className="sticky top-0 flex h-screen w-16 shrink-0 flex-col border-r border-slate-200 bg-white md:w-64">
-        <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-4">
-          <span className="text-2xl">💧</span>
+        <div className="flex items-center gap-2.5 border-b border-slate-200 px-4 py-4">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white"><Icon name="droplet" className="h-5 w-5" /></div>
           <div className="hidden md:block">
             <div className="text-sm font-bold leading-tight text-slate-900">Guardian Water Bank</div>
             <div className="text-[11px] text-slate-500">Mahomet Aquifer</div>
@@ -101,13 +169,13 @@ export default function Dashboard() {
           {NAV.map((it) => (
             <button key={it.id} onClick={() => setTab(it.id)}
               className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition ${tab === it.id ? "bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}>
-              <span className="text-lg">{it.icon}</span><span className="hidden md:inline">{it.id}</span>
+              <Icon name={it.icon} className="h-[18px] w-[18px] shrink-0" /><span className="hidden md:inline">{it.id}</span>
             </button>
           ))}
         </nav>
         <div className="border-t border-slate-200 p-2">
           <button onClick={resetDemo} className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-rose-50 hover:text-rose-600">
-            <span className="text-lg">↺</span><span className="hidden md:inline">Reset demo</span>
+            <Icon name="reset" className="h-[18px] w-[18px] shrink-0" /><span className="hidden md:inline">Reset demo</span>
           </button>
         </div>
       </aside>
@@ -139,7 +207,7 @@ export default function Dashboard() {
             <Card label="7-day change" tag="M" accent="#2563eb"><Counter value={gwChg} decimals={2} suffix=" ft" prefix={gwChg >= 0 ? "+" : ""} /></Card>
             <Card label="Pumping today" tag="M" accent="#2563eb"><Counter value={pumpToday} suffix=" gal" /></Card>
             <Card label="Est. crop need" tag="C" accent="#0d9488" sub={`± ${totalReqPm.toLocaleString()} gal · from ETc ±12%`}><Counter value={totalReq} suffix=" gal" /></Card>
-            <Card label="Rainfall 24h" tag="M" accent="#2563eb"><Counter value={today(weather.rain)} decimals={2} suffix=" in" /></Card>
+            <Card label="Rainfall 24h" tag="M" accent="#2563eb" sub={rainIsNoaa ? "live from NOAA" : "simulated"}><Counter value={today(weather.rain)} decimals={2} suffix=" in" /></Card>
             <Card label="Conflicts to review" accent={conflictsFlagged ? "#d97706" : "#16a34a"} sub="claims where streams disagree"><Counter value={conflictsFlagged} /></Card>
             <Card label="Active alerts" accent={alerts ? "#e11d48" : "#16a34a"}><Counter value={alerts} /></Card>
           </div>
@@ -158,11 +226,14 @@ export default function Dashboard() {
                     <BarChart height={180} unit=" gal" series={meterSeries.map((m, i) => ({ name: m.farm, data: m.gallons, color: ["#2563eb", "#0d9488", "#d97706"][i] }))} />
                   </div>
                   <div className={panel}>
-                    <h3 className="mb-2 text-sm font-semibold text-slate-900">Rainfall <Tag t="M" /> &amp; ET₀ <Tag t="C" /></h3>
+                    <h3 className="mb-1 text-sm font-semibold text-slate-900">Rainfall <Tag t="M" /> &amp; ET₀ <Tag t="C" /></h3>
+                    <p className="mb-2 text-[11px] text-slate-500">{noaaDays > 0
+                      ? <><span className="font-semibold text-blue-600">{noaaDays} recent day{noaaDays !== 1 ? "s" : ""} live from NOAA</span> · {NOAA_STATION} · earlier days simulated</>
+                      : <>simulated · NOAA feed pending</>}</p>
                     <LineChart height={180} area labels={DATES} unit=" in" series={[{ name: "Rain (in)", data: weather.rain, color: "#2563eb" }, { name: "ET₀ (in)", data: weather.et0, color: "#f59e0b" }]} />
                   </div>
                 </div>
-                <p className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">⚠️ MTH-22S data are under ISWS QA/QC — shown with a provenance warning and <b>never marked [V]</b> in this prototype.</p>
+                <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800"><Icon name="warning" className="mt-0.5 h-4 w-4 shrink-0" /><span>MTH-22S data are under ISWS QA/QC — shown with a provenance warning and <b>never marked [V]</b> in this prototype.</span></div>
               </section>
             )}
 
@@ -178,7 +249,7 @@ export default function Dashboard() {
                           <h3 className="text-lg font-bold text-slate-900">{f.id} — {f.crop} ({f.stage}), {f.acres} ac</h3>
                           <p className="mt-1 text-sm text-slate-600">Meter today <Tag t="M" /> <b className="text-slate-900">{c.applied.toLocaleString()} gal</b> · Crop need <Tag t="C" /> <b className="text-slate-900">{c.req.toLocaleString()} ± {c.reqPm.toLocaleString()} gal</b> · ETc <Tag t="C" /> {c.etc} ± {c.etcPm} in</p>
                           {c.conflict ? (
-                            <p className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">🟥 CONFLICT DETECTED — HUMAN REVIEW REQUIRED (independent streams disagree)</p>
+                            <p className="mt-2 flex items-center gap-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700"><Icon name="warning" className="h-4 w-4 shrink-0" />CONFLICT DETECTED — HUMAN REVIEW REQUIRED (independent streams disagree)</p>
                           ) : (
                             <p className="mt-2 text-sm text-slate-600">Evidence: <b className="text-slate-900">{c.corroborate} corroborate</b> · {c.conflictN} conflict · {c.silent} silent <span className="text-slate-400">(of {c.total} independent streams)</span></p>
                           )}
@@ -191,7 +262,7 @@ export default function Dashboard() {
                               <button key={ch} onClick={() => decide(f.id, ch, rec.text)} className={`rounded-lg px-3.5 py-2 text-sm font-semibold text-white transition ${decisions[f.id] === ch ? DECISION_STYLE[ch] + " ring-2 ring-slate-900/30" : DECISION_STYLE[ch] + " opacity-80 hover:opacity-100 hover:-translate-y-0.5"}`}>{ch}</button>
                             ))}
                           </div>
-                          {decisions[f.id] && <p className="mt-2 text-xs font-medium text-emerald-600">✓ Logged: {decisions[f.id]} → ledger</p>}
+                          {decisions[f.id] && <p className="mt-2 flex items-center gap-1 text-xs font-medium text-emerald-600"><Icon name="check" className="h-3.5 w-3.5" />Logged: {decisions[f.id]} → ledger</p>}
                         </div>
                       </div>
                     </div>
@@ -215,16 +286,16 @@ export default function Dashboard() {
                           ? <>No stream corroborates a reduction, and <b className="text-slate-900">{c.conflictN} actively contradict{c.conflictN > 1 ? "" : "s"} it</b> — recommendation is to hold. {c.silent} silent.</>
                           : <>No independent stream corroborates a reduction — the streams are <b className="text-slate-900">silent</b> on this claim (not voting against it).</>}
                       {" "}{c.conflict
-                        ? <span className="font-semibold text-red-600">🟥 CONFLICT — human review</span>
+                        ? <span className="font-semibold text-red-600"><Dot color="#dc2626" /> CONFLICT — human review</span>
                         : c.conflictN > 0
-                          ? <span className="font-semibold text-amber-600">🟧 {c.conflictN} stream{c.conflictN > 1 ? "s" : ""} contradict — reduction not supported</span>
-                          : <span className="text-emerald-600">🟩 no conflict</span>}
+                          ? <span className="font-semibold text-amber-600"><Dot color="#d97706" /> {c.conflictN} stream{c.conflictN > 1 ? "s" : ""} contradict — reduction not supported</span>
+                          : <span className="text-emerald-600"><Dot color="#16a34a" /> no conflict</span>}
                     </p>
                     <p className="mt-1 text-xs text-slate-400">Guardian does not average or tally votes — each stream corroborates, conflicts, or stays silent on this specific claim.</p>
                     <div className="mt-3 space-y-2">
                       {c.streams.map((s) => (
                         <details key={s.name} className="group rounded-lg border border-slate-200 bg-slate-50 p-3 transition hover:border-slate-300">
-                          <summary className="cursor-pointer text-sm text-slate-700">{s.status === "corroborate" ? "✅ corroborates" : s.status === "conflict" ? "🟥 conflicts" : "➖ silent"} · <b>{s.name}</b> [{s.tag}] — {s.value}</summary>
+                          <summary className="cursor-pointer text-sm text-slate-700"><Dot color={s.status === "corroborate" ? "#16a34a" : s.status === "conflict" ? "#dc2626" : "#94a3b8"} /> <span className="font-medium">{s.status === "corroborate" ? "corroborates" : s.status === "conflict" ? "conflicts" : "silent"}</span> · <b>{s.name}</b> [{s.tag}] — {s.value}</summary>
                           <div className="mt-2 text-xs text-slate-500"><b>Where did this come from?</b>{" "}
                             {s.name.includes("Groundwater") && `ISWS Groundwater Monitoring Network (real well IDs). 7-day mean change: ${c.trend >= 0 ? "+" : ""}${c.trend} ft. Class: [M].`}
                             {s.name.includes("meter") && "Farm flow meter — SIMULATED, DEMO ONLY. Applied vs calculated need (ETc × acres × 27,150). [M]/[C]."}
@@ -266,7 +337,7 @@ export default function Dashboard() {
                     </div>
                     <div className="mt-3"><LineChart height={160} area unit=" gal" series={[{ name: "baseline", data: Array(30).fill(pumpToday), color: "#2563eb" }, { name: "with new user", data: Array(30).fill(total), color: "#db2777" }]} /></div>
                   </div>
-                  <p className="rounded-lg border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800">🟧 SCENARIO — NOT A FORECAST. Illustrative cumulative demand only; aquifer response requires the hydrogeologic model + uncertainty.</p>
+                  <div className="flex items-start gap-2 rounded-lg border border-orange-300 bg-orange-50 p-3 text-sm text-orange-800"><Icon name="warning" className="mt-0.5 h-4 w-4 shrink-0" /><span>SCENARIO — NOT A FORECAST. Illustrative cumulative demand only; aquifer response requires the hydrogeologic model + uncertainty.</span></div>
                 </section>
               );
             })()}
@@ -286,7 +357,7 @@ export default function Dashboard() {
 
             {tab === "Audit Ledger" && (
               <section className="space-y-3">
-                <h3 className="text-lg font-semibold text-slate-900">Tamper-evident audit ledger 🔗 (SHA-256 chain)</h3>
+                <h3 className="text-lg font-semibold text-slate-900">Tamper-evident audit ledger (SHA-256 chain)</h3>
                 <p className="text-sm text-slate-500">Each record hashes the previous record. Historical values are never overwritten — a change creates a new version.</p>
                 {ledger.length === 0 ? (
                   <p className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">No events yet — go to <b>Farms &amp; Decisions</b> and click Approve/Modify/Delay/Reject, or record a verification, then they appear here as an immutable chain.</p>
@@ -315,8 +386,8 @@ export default function Dashboard() {
                     </table>
                   </div>
                   <div className="flex flex-wrap gap-3">
-                    <button onClick={() => download("guardian_water_bank_evidence.csv", csv, "text/csv")} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500">⬇️ Evidence package (CSV)</button>
-                    <button onClick={() => download("guardian_water_bank_report.txt", report)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100">⬇️ Evidence report (TXT)</button>
+                    <button onClick={() => download("guardian_water_bank_evidence.csv", csv, "text/csv")} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"><Icon name="download" className="h-4 w-4" />Evidence package (CSV)</button>
+                    <button onClick={() => download("guardian_water_bank_report.txt", report)} className="flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"><Icon name="download" className="h-4 w-4" />Evidence report (TXT)</button>
                   </div>
                   <p className="text-xs text-slate-400">PDF hook: swap the TXT writer for a server route + a PDF lib in production for a branded, signed package.</p>
                 </section>
