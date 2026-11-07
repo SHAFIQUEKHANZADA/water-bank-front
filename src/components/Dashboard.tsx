@@ -48,6 +48,8 @@ const ICONS: Record<string, React.ReactNode> = {
   droplet: <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" />,
   warning: <><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" x2="12" y1="9" y2="13" /><line x1="12" x2="12.01" y1="17" y2="17" /></>,
   check: <polyline points="20 6 9 17 4 12" />,
+  play: <><circle cx="12" cy="12" r="10" /><polygon points="10 8 16 12 10 16 10 8" /></>,
+  close: <><line x1="18" x2="6" y1="6" y2="18" /><line x1="6" x2="18" y1="6" y2="18" /></>,
   download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" /></>,
 };
 function Icon({ name, className = "h-5 w-5" }: { name: keyof typeof ICONS | string; className?: string }) {
@@ -104,6 +106,14 @@ export default function Dashboard({ data }: { data: WaterData }) {
   const [dcM, setDcM] = useState(1);
   const [selFarm, setSelFarm] = useState(FARMS[0].id);
   const [rev, setRev] = useState({ reviewer: "", org: "", note: "" });
+  // "How to read this dashboard" explainer video (public/how-to-read.mp4).
+  const [showVideo, setShowVideo] = useState(false);
+  useEffect(() => {
+    if (!showVideo) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowVideo(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showVideo]);
 
   const consByFarm = useMemo(() => { const o: Record<string, Consensus> = {}; FARMS.forEach((f) => (o[f.id] = consensusForFarm(f, data))); return o; }, [FARMS, data]);
 
@@ -189,6 +199,9 @@ export default function Dashboard({ data }: { data: WaterData }) {
             <p className="text-xs text-slate-500">Every drop has a reason. <b className="text-slate-700">Every decision has a record.</b></p>
           </div>
           <div className="flex items-center gap-3 text-xs">
+            <button onClick={() => setShowVideo(true)} className="flex items-center gap-1.5 rounded-full bg-blue-600 px-3 py-1.5 font-semibold text-white shadow-sm transition hover:bg-blue-500">
+              <Icon name="play" className="h-4 w-4" />How to read this · 4 min
+            </button>
             <span className="flex items-center gap-1.5 text-slate-500"><span className="pulse-dot inline-block h-2 w-2 rounded-full bg-emerald-500" /> Live · synced {TODAY} 08:45</span>
             <span className="rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 font-bold tracking-wide text-amber-700">RESEARCH PROTOTYPE</span>
           </div>
@@ -395,6 +408,18 @@ export default function Dashboard({ data }: { data: WaterData }) {
             })()}
           </main>
         </div>
+
+        {showVideo && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4 backdrop-blur-sm" onClick={() => setShowVideo(false)} role="dialog" aria-modal="true" aria-label="How to read this dashboard">
+            <div className="w-full max-w-5xl overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+                <p className="text-sm font-semibold text-slate-900">How to read this dashboard</p>
+                <button onClick={() => setShowVideo(false)} aria-label="Close video" className="rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"><Icon name="close" className="h-5 w-5" /></button>
+              </div>
+              <video src="/how-to-read.mp4" controls autoPlay playsInline className="aspect-video w-full bg-black" />
+            </div>
+          </div>
+        )}
 
         <footer className="border-t border-slate-200 px-6 py-4 text-center text-xs text-slate-400">Guardian Water Bank · RESEARCH PROTOTYPE · Every drop has a reason. Every decision has a record. · For demonstration &amp; scientific review only.</footer>
       </div>
