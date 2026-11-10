@@ -253,7 +253,7 @@ export default function Dashboard({ data }: { data: WaterData }) {
           </div>
           <div className="flex items-center gap-3 text-xs">
             <button onClick={() => setShowVideo(true)} className="flex items-center gap-1.5 rounded-full bg-blue-600 px-3 py-1.5 font-semibold text-white shadow-sm transition hover:bg-blue-500">
-              <Icon name="play" className="h-4 w-4" />How to read this · 4 min
+              <Icon name="play" className="h-4 w-4" />How to read this · 5 min
             </button>
             <span className="flex items-center gap-1.5 text-slate-500"><span className="pulse-dot inline-block h-2 w-2 rounded-full bg-emerald-500" /> Live · synced {TODAY} 08:45</span>
             <span className="rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 font-bold tracking-wide text-amber-700">RESEARCH PROTOTYPE</span>
