@@ -1,4 +1,4 @@
-// Guardian Water Bank — types + deterministic COMPUTE logic.
+// Illinois Farm Water & Energy Pilot — types + deterministic COMPUTE logic.
 // The data itself now comes from the database (see lib/data.ts); this file no
 // longer generates it. Every figure still carries ONE evidence tag: M|C|E|R|V.
 
@@ -117,6 +117,68 @@ export function recommendation(c: Consensus): { text: string; pct: number | null
   if (c.corroborate >= 2 && c.applied > c.req)
     return { text: "Consider reducing next application by ~15%", pct: 15 };
   return { text: "Hold — no independent stream corroborates a reduction", pct: 0 };
+}
+
+// ---- Water accounting: applied water vs ET consumptive use -------------------
+// Applied water (meter) and water the crop actually consumed (ET) are reported
+// SIDE BY SIDE. Their difference is NOT assumed to be groundwater savings: on
+// the sandy, unconfined Mahomet outcrop soils much of the water applied but not
+// consumed drains back to the aquifer, and near the rivers saved water can leave
+// as baseflow within months. Depths are inches over the field (gal / (ac·27,150)).
+export interface WaterAccount {
+  days: number;
+  appliedIn: number;        // [M] metered water applied (SIMULATED in this prototype)
+  cropEtIn: number;         // [C] crop ET = Σ ET0 × Kc  (total consumptive use)
+  cropEtPm: number;         // ± from the ETc method error
+  effRainIn: number;        // [C] effective rain = Σ min(0.8 × rain, ETc)
+  irrigEtIn: number;        // [C] consumptive use the irrigation had to supply = Σ max(ETc − eff. rain, 0)
+  notConsumedIn: number;    // applied − irrigation-supplied ET: fate unknown, NOT counted as savings
+  appliedGal: number;
+  irrigEtGal: number;
+}
+
+export function waterAccount(farm: Farm, data: WaterData): WaterAccount {
+  const meter = data.meterSeries.find((m) => m.farm === farm.id)?.gallons ?? [];
+  const n = Math.min(meter.length, data.weather.et0.length, data.weather.rain.length);
+  let applied = 0, et = 0, eff = 0, irrig = 0;
+  for (let i = data.weather.et0.length - n, j = meter.length - n; j < meter.length; i++, j++) {
+    const etc = data.weather.et0[i] * farm.kc;
+    const e = Math.min(data.weather.rain[i] * 0.8, etc);
+    applied += meter[j]; et += etc; eff += e; irrig += Math.max(etc - e, 0);
+  }
+  const toIn = (gal: number) => gal / (farm.acres * GAL_PER_ACRE_INCH);
+  const appliedIn = toIn(applied);
+  return {
+    days: n,
+    appliedIn: +appliedIn.toFixed(2),
+    cropEtIn: +et.toFixed(2),
+    cropEtPm: +(et * UNC_ETC).toFixed(2),
+    effRainIn: +eff.toFixed(2),
+    irrigEtIn: +irrig.toFixed(2),
+    notConsumedIn: +(appliedIn - irrig).toFixed(2),
+    appliedGal: Math.round(applied),
+    irrigEtGal: Math.round(irrig * farm.acres * GAL_PER_ACRE_INCH),
+  };
+}
+
+// ---- Energy: pumping energy is MODELED here, from applied water + assumptions --
+// In the pilot, energy is measured from pump electric meters / utility bills.
+// Until then it is estimated; every input below that is not measured is an
+// UNVERIFIED ASSUMPTION and is shown as one.
+export const KWH_PER_ACFT_FT = 1.0245; // physics: lift 1 acre-foot by 1 ft at 100% efficiency
+export interface EnergyAssumptions {
+  drawdownFt: number;     // pumping drawdown below static level
+  pressureFt: number;     // pivot operating pressure as head (30 psi ≈ 69 ft)
+  plantEfficiency: number;// pump + motor overall efficiency
+  pricePerKwh: number;    // electricity tariff, $/kWh
+}
+export const DEFAULT_ENERGY: EnergyAssumptions = { drawdownFt: 20, pressureFt: 69, plantEfficiency: 0.55, pricePerKwh: 0.12 };
+
+export function pumpingEnergy(appliedGal: number, depthToWaterFt: number, a: EnergyAssumptions = DEFAULT_ENERGY) {
+  const acFt = appliedGal / (GAL_PER_ACRE_INCH * 12);
+  const liftFt = depthToWaterFt + a.drawdownFt + a.pressureFt;
+  const kwh = (acFt * liftFt * KWH_PER_ACFT_FT) / a.plantEfficiency;
+  return { acFt: +acFt.toFixed(2), liftFt: Math.round(liftFt), kwh: Math.round(kwh), cost: Math.round(kwh * a.pricePerKwh) };
 }
 
 // SHA-256 hash chain via Web Crypto (async) — still used client-side for the

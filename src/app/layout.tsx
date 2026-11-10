@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Guardian Water Bank — Mahomet Aquifer",
-  description: "Human-in-the-loop measurement, decision & verification prototype for water.",
+  title: "Illinois Farm Water & Energy Pilot",
+  description: "Measuring irrigation water and energy, field by field. An independent, evidence-based agricultural research pilot. Phase 1: Mahomet Aquifer.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

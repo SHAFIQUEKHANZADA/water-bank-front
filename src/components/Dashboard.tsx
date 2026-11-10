@@ -4,8 +4,35 @@ import { LineChart, BarChart } from "./Charts";
 import {
   NOAA_STATION, TODAY, TAG_COLORS, TAG_MEANING,
   consensusForFarm, recommendation, cropRequirement, gwTrend, today, sha256,
-  type Tag as TagT, type Consensus, type WaterData,
+  waterAccount, pumpingEnergy, DEFAULT_ENERGY, KWH_PER_ACFT_FT, GAL_PER_ACRE_INCH,
+  type Tag as TagT, type Consensus, type WaterData, type WaterAccount,
 } from "@/lib/waterbank";
+
+export const PILOT_NAME = "Illinois Farm Water & Energy Pilot";
+export const PILOT_TAGLINE = "Measuring irrigation water and energy, field by field.";
+
+/* What a figure rests on: measured, modeled, or an assumption nobody has verified yet. */
+type BasisT = "measured" | "simulated" | "modeled" | "assumption" | "physics";
+const BASIS: Record<BasisT, { label: string; cls: string }> = {
+  measured: { label: "Measured", cls: "bg-blue-50 text-blue-700 ring-blue-200" },
+  simulated: { label: "Measured in pilot · SIMULATED now", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
+  modeled: { label: "Modeled estimate", cls: "bg-teal-50 text-teal-700 ring-teal-200" },
+  assumption: { label: "Unverified assumption", cls: "bg-rose-50 text-rose-700 ring-rose-200" },
+  physics: { label: "Physical constant", cls: "bg-slate-100 text-slate-600 ring-slate-200" },
+};
+function Basis({ b }: { b: BasisT }) {
+  return <span className={`inline-block rounded-full px-2 py-0.5 text-[10.5px] font-semibold ring-1 ring-inset align-middle ${BASIS[b].cls}`}>{BASIS[b].label}</span>;
+}
+type GateT = "go" | "nogo" | "inconclusive" | "pending";
+const GATE: Record<GateT, { label: string; cls: string }> = {
+  go: { label: "GO", cls: "bg-emerald-600 text-white" },
+  nogo: { label: "NO-GO", cls: "bg-rose-600 text-white" },
+  inconclusive: { label: "INCONCLUSIVE", cls: "bg-amber-500 text-white" },
+  pending: { label: "NOT YET EVALUABLE", cls: "bg-slate-200 text-slate-700" },
+};
+function Gate({ g }: { g: GateT }) {
+  return <span className={`inline-block rounded-md px-2.5 py-1 text-[11px] font-bold tracking-wide ${GATE[g].cls}`}>{GATE[g].label}</span>;
+}
 
 /* ---------- atoms ---------- */
 function Tag({ t }: { t: TagT }) {
@@ -51,6 +78,8 @@ const ICONS: Record<string, React.ReactNode> = {
   play: <><circle cx="12" cy="12" r="10" /><polygon points="10 8 16 12 10 16 10 8" /></>,
   close: <><line x1="18" x2="6" y1="6" y2="18" /><line x1="6" x2="18" y1="6" y2="18" /></>,
   download: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" x2="12" y1="15" y2="3" /></>,
+  accounting: <><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" /><path d="M8 14h8" /></>,
+  gate: <><path d="M4 21V4" /><path d="M4 4h12l-2 4 2 4H4" /></>,
 };
 function Icon({ name, className = "h-5 w-5" }: { name: keyof typeof ICONS | string; className?: string }) {
   return (
@@ -87,7 +116,8 @@ function mapEntry(e: DbEntry): LedgerRow {
   };
 }
 const NAV = [
-  { id: "Overview", icon: "overview" }, { id: "Farms & Decisions", icon: "farms" }, { id: "Guardian Evidence", icon: "evidence" },
+  { id: "Overview", icon: "overview" }, { id: "Farms & Decisions", icon: "farms" },
+  { id: "Water Accounting", icon: "accounting" }, { id: "Go / No-Go", icon: "gate" }, { id: "Evidence", icon: "evidence" },
   { id: "What-if", icon: "whatif" }, { id: "Policy", icon: "policy" }, { id: "Audit Ledger", icon: "ledger" }, { id: "Export", icon: "export" },
 ] as const;
 type TabId = (typeof NAV)[number]["id"];
@@ -116,6 +146,7 @@ export default function Dashboard({ data }: { data: WaterData }) {
   }, [showVideo]);
 
   const consByFarm = useMemo(() => { const o: Record<string, Consensus> = {}; FARMS.forEach((f) => (o[f.id] = consensusForFarm(f, data))); return o; }, [FARMS, data]);
+  const acctByFarm = useMemo(() => { const o: Record<string, WaterAccount> = {}; FARMS.forEach((f) => (o[f.id] = waterAccount(f, data))); return o; }, [FARMS, data]);
 
   // The ledger is authoritative in the DB (append-only, SHA-256 chained). Load
   // it on mount and after every write — it persists across refreshes now.
@@ -158,6 +189,28 @@ export default function Dashboard({ data }: { data: WaterData }) {
   const noaaDays = weather.rainSource.filter((s) => s === "noaa").length;
   const rainIsNoaa = today(weather.rainSource) === "noaa";
 
+  // Period totals for water accounting and the modeled energy estimate.
+  const acctDays = Math.min(...FARMS.map((f) => acctByFarm[f.id].days));
+  const totAppliedGal = FARMS.reduce((a, f) => a + acctByFarm[f.id].appliedGal, 0);
+  const totIrrigEtGal = FARMS.reduce((a, f) => a + acctByFarm[f.id].irrigEtGal, 0);
+  const energy = pumpingEnergy(totAppliedGal, gwNow);
+  const periodRain = weather.rain.slice(-acctDays).reduce((a, b) => a + b, 0);
+  const periodEt0 = weather.et0.slice(-acctDays).reduce((a, b) => a + b, 0);
+  // Cumulative applied vs irrigation-supplied crop ET, all farms (gallons).
+  const cum = useMemo(() => {
+    const n = acctDays; const applied: number[] = []; const used: number[] = [];
+    let a = 0, u = 0;
+    for (let k = 0; k < n; k++) {
+      const i = weather.et0.length - n + k;
+      FARMS.forEach((f) => {
+        const g = meterSeries.find((m) => m.farm === f.id)!.gallons; a += g[g.length - n + k];
+        const etc = weather.et0[i] * f.kc; u += Math.max(etc - Math.min(weather.rain[i] * 0.8, etc), 0) * f.acres * GAL_PER_ACRE_INCH;
+      });
+      applied.push(Math.round(a)); used.push(Math.round(u));
+    }
+    return { labels: DATES.slice(-n), applied, used };
+  }, [acctDays, FARMS, meterSeries, weather, DATES]);
+
   function download(name: string, text: string, type = "text/plain") {
     const url = URL.createObjectURL(new Blob([text], { type }));
     const a = document.createElement("a"); a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url);
@@ -171,8 +224,8 @@ export default function Dashboard({ data }: { data: WaterData }) {
         <div className="flex items-center gap-2.5 border-b border-slate-200 px-4 py-4">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white"><Icon name="droplet" className="h-5 w-5" /></div>
           <div className="hidden md:block">
-            <div className="text-sm font-bold leading-tight text-slate-900">Guardian Water Bank</div>
-            <div className="text-[11px] text-slate-500">Mahomet Aquifer</div>
+            <div className="text-sm font-bold leading-tight text-slate-900">{PILOT_NAME}</div>
+            <div className="text-[11px] text-slate-500">Phase 1: Mahomet Aquifer</div>
           </div>
         </div>
         <nav className="flex-1 space-y-1 p-2">
@@ -196,7 +249,7 @@ export default function Dashboard({ data }: { data: WaterData }) {
         <header className="sticky top-0 z-20 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/90 px-6 py-3 backdrop-blur">
           <div>
             <h1 className="text-lg font-bold text-slate-900">{tab}</h1>
-            <p className="text-xs text-slate-500">Every drop has a reason. <b className="text-slate-700">Every decision has a record.</b></p>
+            <p className="text-xs text-slate-500">{PILOT_TAGLINE} <b className="text-slate-700">Phase 1: Mahomet Aquifer.</b></p>
           </div>
           <div className="flex items-center gap-3 text-xs">
             <button onClick={() => setShowVideo(true)} className="flex items-center gap-1.5 rounded-full bg-blue-600 px-3 py-1.5 font-semibold text-white shadow-sm transition hover:bg-blue-500">
@@ -213,6 +266,7 @@ export default function Dashboard({ data }: { data: WaterData }) {
             Evidence tags:{(["M", "C", "E", "R", "V"] as TagT[]).map((t) => <Tag key={t} t={t} />)}
             <span className="text-slate-400">— one tag per figure, never blended.</span>
           </div>
+          <p className="pt-2 text-xs text-slate-500">An independent, evidence-based agricultural research pilot testing whether measurable gains in irrigation efficiency produce verifiable water and energy benefits, and what they are worth. <b className="text-slate-700">Not a water banking or water trading program.</b></p>
 
           {/* cards */}
           <div className="grid grid-cols-2 gap-3 py-4 sm:grid-cols-4 lg:grid-cols-7">
@@ -261,6 +315,9 @@ export default function Dashboard({ data }: { data: WaterData }) {
                         <div className="min-w-[280px] flex-1">
                           <h3 className="text-lg font-bold text-slate-900">{f.id} — {f.crop} ({f.stage}), {f.acres} ac</h3>
                           <p className="mt-1 text-sm text-slate-600">Meter today <Tag t="M" /> <b className="text-slate-900">{c.applied.toLocaleString()} gal</b> · Crop need <Tag t="C" /> <b className="text-slate-900">{c.req.toLocaleString()} ± {c.reqPm.toLocaleString()} gal</b> · ETc <Tag t="C" /> {c.etc} ± {c.etcPm} in</p>
+                          {(() => { const a = acctByFarm[f.id]; return (
+                            <p className="mt-1 text-sm text-slate-600">Last {a.days} days: applied <Tag t="M" /> <b className="text-slate-900">{a.appliedIn} in</b> · consumed by crop (ET) <Tag t="C" /> <b className="text-slate-900">{a.cropEtIn} ± {a.cropEtPm} in</b>, of which irrigation supplied <b className="text-slate-900">{a.irrigEtIn} in</b> <span className="text-slate-400">(difference not counted as groundwater savings)</span></p>
+                          ); })()}
                           {c.conflict ? (
                             <p className="mt-2 flex items-center gap-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700"><Icon name="warning" className="h-4 w-4 shrink-0" />CONFLICT DETECTED — HUMAN REVIEW REQUIRED (independent streams disagree)</p>
                           ) : (
@@ -284,11 +341,137 @@ export default function Dashboard({ data }: { data: WaterData }) {
               </section>
             )}
 
-            {tab === "Guardian Evidence" && (() => {
+            {tab === "Water Accounting" && (
+              <section className="space-y-5">
+                <div className={panel}>
+                  <h2 className="font-semibold text-slate-900">Applied water vs. ET consumptive use — last {acctDays} days</h2>
+                  <p className="mt-1 text-sm text-slate-600">Water <b>applied</b> to a field and water the crop actually <b>consumed</b> (evapotranspiration, ET) are reported side by side. The difference between them is <b>not</b> assumed to be groundwater savings.</p>
+                  <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-xs text-slate-500"><tr>
+                        <th className="px-3 py-2">Farm</th>
+                        <th className="px-3 py-2">Applied <Tag t="M" /><div className="mt-1"><Basis b="simulated" /></div></th>
+                        <th className="px-3 py-2">Crop ET (total consumed) <Tag t="C" /><div className="mt-1"><Basis b="modeled" /></div></th>
+                        <th className="px-3 py-2">Effective rain <Tag t="C" /></th>
+                        <th className="px-3 py-2">ET supplied by irrigation <Tag t="C" /></th>
+                        <th className="px-3 py-2">Applied but not consumed<div className="mt-1 font-normal text-slate-400">fate unknown</div></th>
+                      </tr></thead>
+                      <tbody>{FARMS.map((f) => { const a = acctByFarm[f.id]; return (
+                        <tr key={f.id} className="border-t border-slate-100 hover:bg-slate-50">
+                          <td className="px-3 py-2 font-semibold text-slate-900">{f.id} <span className="font-normal text-slate-500">· {f.crop}, {f.acres} ac</span></td>
+                          <td className="px-3 py-2"><b className="text-slate-900">{a.appliedIn} in</b><div className="text-[11px] text-slate-400">{a.appliedGal.toLocaleString()} gal</div></td>
+                          <td className="px-3 py-2"><b className="text-slate-900">{a.cropEtIn} in</b><div className="text-[11px] text-slate-400">± {a.cropEtPm} in (ETc method)</div></td>
+                          <td className="px-3 py-2">{a.effRainIn} in</td>
+                          <td className="px-3 py-2"><b className="text-slate-900">{a.irrigEtIn} in</b><div className="text-[11px] text-slate-400">{a.irrigEtGal.toLocaleString()} gal</div></td>
+                          <td className="px-3 py-2 text-slate-600">{a.notConsumedIn >= 0 ? `${a.notConsumedIn} in` : <span className="text-amber-700">none — applied is below ET supplied by irrigation</span>}</td>
+                        </tr>); })}</tbody>
+                    </table>
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-400">Depth over the field (in) = gallons ÷ (acres × 27,150). Crop ET = ET₀ (Hargreaves-Samani) × Kc (FAO-56). Effective rain = 80% of daily rain, capped at that day&apos;s crop ET.</p>
+                  {FARMS.some((f) => acctByFarm[f.id].notConsumedIn < 0) && (
+                    <p className="mt-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800"><Icon name="warning" className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span><b>Demo data limitation, not a finding:</b> the simulated farm meters record far less water than the crops consumed from irrigation. Real metered pumping replaces them when the pilot begins; until then the applied column shows how the accounting works, not real farm use.</span></p>
+                  )}
+                </div>
+                <div className={panel}>
+                  <h3 className="mb-2 text-sm font-semibold text-slate-900">Cumulative, all farms: applied <Tag t="M" /> vs. ET supplied by irrigation <Tag t="C" /> <span className="text-[11px] text-amber-600">APPLIED IS SIMULATED — DEMO ONLY</span></h3>
+                  <LineChart height={200} area labels={cum.labels} unit=" M gal" series={[{ name: "Applied", data: cum.applied.map((v) => +(v / 1e6).toFixed(2)), color: "#2563eb" }, { name: "ET supplied by irrigation", data: cum.used.map((v) => +(v / 1e6).toFixed(2)), color: "#0d9488" }]} />
+                </div>
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                  <p className="flex items-center gap-2 font-semibold"><Icon name="warning" className="h-4 w-4 shrink-0" />Why &quot;applied but not consumed&quot; is not reported as water saved</p>
+                  <ul className="mt-2 list-disc space-y-1 pl-6">
+                    <li>On the sandy, unconfined soils of the Mahomet outcrop, much of the water applied beyond crop use drains back down to the aquifer.</li>
+                    <li>Near the Illinois and Sangamon rivers, groundwater left in place largely leaves as river baseflow within months, so the benefit is better described as reduced streamflow depletion in summer than as stored water.</li>
+                    <li>The measurable benefits of using less water may be pumping energy and reduced nitrate leaching. Deep percolation and nitrate need below-root-zone soil moisture or soil nitrate measurements before they can be reported.</li>
+                  </ul>
+                </div>
+              </section>
+            )}
+
+            {tab === "Go / No-Go" && (() => {
+              const assumptions: { name: string; value: string; b: BasisT; note: string }[] = [
+                { name: "Depth to water", value: `${gwNow.toFixed(1)} ft`, b: "measured", note: "Mean of the ISWS monitoring wells on the Overview." },
+                { name: "Pumping drawdown", value: `${DEFAULT_ENERGY.drawdownFt} ft`, b: "assumption", note: "Replace with each well's pump test." },
+                { name: "System pressure head", value: `${DEFAULT_ENERGY.pressureFt} ft (≈30 psi)`, b: "assumption", note: "Replace with each pivot's operating pressure." },
+                { name: "Pumping plant efficiency", value: `${Math.round(DEFAULT_ENERGY.plantEfficiency * 100)}%`, b: "assumption", note: "Replace with a pump efficiency test." },
+                { name: "Electricity price", value: `$${DEFAULT_ENERGY.pricePerKwh.toFixed(2)}/kWh`, b: "assumption", note: "Replace with each farm's tariff." },
+                { name: "Energy to lift water", value: `${KWH_PER_ACFT_FT} kWh per acre-ft per ft`, b: "physics", note: "At 100% efficiency." },
+              ];
+              return (
+                <section className="space-y-5">
+                  <div className={panel}>
+                    <h2 className="font-semibold text-slate-900">Go / No-Go framework</h2>
+                    <p className="mt-1 text-sm text-slate-600">Water and energy are assessed <b>separately</b>, then combined into one economic feasibility decision. Pass or fail rests only on what can be measured: <b>applied water</b> and <b>pumping energy</b>. Yield is reported with its uncertainty but is <b>never used for pass/fail</b>, because a plausible yield effect is smaller than yield-monitor error and the normal difference between paired fields.</p>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">Possible outcomes: <Gate g="go" /> <Gate g="nogo" /> <Gate g="inconclusive" /> <Gate g="pending" /></div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">Every input is labeled: <Basis b="measured" /> <Basis b="simulated" /> <Basis b="modeled" /> <Basis b="assumption" /></div>
+                  </div>
+
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <div className={panel}>
+                      <div className="flex items-start justify-between gap-3"><h3 className="font-semibold text-slate-900">1. Water assessment</h3><Gate g="pending" /></div>
+                      <p className="mt-2 text-sm text-slate-600"><b>Measures:</b> change in applied water on treatment fields vs. their paired control fields (difference-in-differences, weather-normalized), reported next to ET consumptive use.</p>
+                      <p className="mt-2 text-sm text-slate-600"><b>Passes when:</b> treatment fields apply less water than their controls by at least the agreed threshold. A lower applied total is reported as water applied, not as groundwater saved.</p>
+                      <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm">
+                        <div className="text-xs font-semibold uppercase text-slate-500">Prototype reading · last {acctDays} days, all farms</div>
+                        <div className="mt-1">Applied <Tag t="M" /> <b className="text-slate-900">{totAppliedGal.toLocaleString()} gal</b> <Basis b="simulated" /></div>
+                        <div className="mt-1">ET supplied by irrigation <Tag t="C" /> <b className="text-slate-900">{totIrrigEtGal.toLocaleString()} gal</b> <Basis b="modeled" /></div>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">Not yet evaluable: farm meters are simulated and there are no paired control fields yet. Evaluation starts with metered pilot data.</p>
+                    </div>
+
+                    <div className={panel}>
+                      <div className="flex items-start justify-between gap-3"><h3 className="font-semibold text-slate-900">2. Energy assessment</h3><Gate g="pending" /></div>
+                      <p className="mt-2 text-sm text-slate-600"><b>Measures:</b> pumping electricity (kWh) from pump meters or utility bills on treatment vs. control fields.</p>
+                      <p className="mt-2 text-sm text-slate-600"><b>Passes when:</b> treatment fields use less pumping energy than their controls by at least the agreed threshold.</p>
+                      <div className="mt-3 rounded-lg bg-slate-50 p-3 text-sm">
+                        <div className="text-xs font-semibold uppercase text-slate-500">Prototype estimate · last {acctDays} days, all farms</div>
+                        <div className="mt-1">Pumping energy <Tag t="E" /> <b className="text-slate-900">{energy.kwh.toLocaleString()} kWh</b> ≈ <b className="text-slate-900">${energy.cost.toLocaleString()}</b> <Basis b="modeled" /></div>
+                        <div className="mt-1 text-[11px] text-slate-500">{energy.acFt} acre-ft × {energy.liftFt} ft total lift × {KWH_PER_ACFT_FT} ÷ {DEFAULT_ENERGY.plantEfficiency} efficiency</div>
+                      </div>
+                      <p className="mt-2 text-xs text-slate-500">Not yet evaluable: no metered energy data. The estimate rests on simulated pumping and the assumptions below.</p>
+                    </div>
+                  </div>
+
+                  <div className={panel}>
+                    <h4 className="mb-2 text-sm font-semibold text-slate-900">Energy estimate inputs</h4>
+                    <div className="overflow-x-auto rounded-xl border border-slate-200">
+                      <table className="w-full text-left text-sm">
+                        <thead className="bg-slate-50 text-xs text-slate-500"><tr>{["Input", "Value", "Basis", "To replace it"].map((h) => <th key={h} className="px-3 py-2">{h}</th>)}</tr></thead>
+                        <tbody>{assumptions.map((a) => (<tr key={a.name} className="border-t border-slate-100"><td className="px-3 py-2 font-medium text-slate-900">{a.name}</td><td className="px-3 py-2">{a.value}</td><td className="px-3 py-2"><Basis b={a.b} /></td><td className="px-3 py-2 text-xs text-slate-500">{a.note}</td></tr>))}</tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className={panel}>
+                    <div className="flex items-start justify-between gap-3"><h3 className="font-semibold text-slate-900">3. Combined economic feasibility decision</h3><Gate g="pending" /></div>
+                    <ul className="mt-2 list-disc space-y-1 pl-6 text-sm text-slate-600">
+                      <li><b>Go</b> requires both the water and the energy assessments to pass on measured data.</li>
+                      <li><b>Economic value</b> is then calculated from measured savings: energy saved × each farm&apos;s tariff, against the documented program cost.</li>
+                      <li><b>Yield:</b> reported with its uncertainty, excluded from the decision.</li>
+                      <li><b>Water:</b> reported in physical units (applied, consumed). It is not given a dollar value as stored groundwater.</li>
+                      <li><b>Thresholds</b> for each assessment will be agreed with independent reviewers before the season starts.</li>
+                    </ul>
+                  </div>
+
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
+                      <p className="font-semibold">Wet season rule (set in advance)</p>
+                      <p className="mt-1">If rain covers most of the crop&apos;s water need, both fields in a pair irrigate very little and no treatment effect can show. That season is reported as <b>Inconclusive</b>, not No-Go.</p>
+                      <p className="mt-2 text-xs">Last {acctDays} days: rain <Tag t="M" /> {periodRain.toFixed(1)} in vs. reference ET₀ <Tag t="C" /> {periodEt0.toFixed(1)} in.</p>
+                    </div>
+                    <div className="rounded-lg border border-slate-300 bg-slate-50 p-4 text-sm text-slate-700">
+                      <p className="font-semibold">Where results apply</p>
+                      <p className="mt-1">Phase 1 covers the sandy, unconfined Mahomet outcrop. Results are not extended to confined settings or bedrock-aquifer areas, and no statewide figure is reported until there is at least one dry season of data. Scaling across Illinois is evaluated by soil and aquifer setting.</p>
+                    </div>
+                  </div>
+                </section>
+              );
+            })()}
+
+            {tab === "Evidence" && (() => {
               const c = consByFarm[selFarm];
               return (
                 <section className="space-y-4">
-                  <p className="text-sm text-slate-500">Guardian keeps sources SEPARATE and shows agreement/conflict per claim — it does NOT average different measurements together.</p>
+                  <p className="text-sm text-slate-500">Sources are kept SEPARATE, with agreement/conflict shown per claim. Different measurements are NOT averaged together.</p>
                   <select value={selFarm} onChange={(e) => setSelFarm(e.target.value)} className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900">{FARMS.map((f) => <option key={f.id}>{f.id}</option>)}</select>
                   <div className={panel}>
                     <h3 className="text-lg font-semibold text-slate-900">Claim: <i>reduce next irrigation for {selFarm}?</i></h3>
@@ -304,7 +487,7 @@ export default function Dashboard({ data }: { data: WaterData }) {
                           ? <span className="font-semibold text-amber-600"><Dot color="#d97706" /> {c.conflictN} stream{c.conflictN > 1 ? "s" : ""} contradict — reduction not supported</span>
                           : <span className="text-emerald-600"><Dot color="#16a34a" /> no conflict</span>}
                     </p>
-                    <p className="mt-1 text-xs text-slate-400">Guardian does not average or tally votes — each stream corroborates, conflicts, or stays silent on this specific claim.</p>
+                    <p className="mt-1 text-xs text-slate-400">Streams are not averaged and do not tally votes — each stream corroborates, conflicts, or stays silent on this specific claim.</p>
                     <div className="mt-3 space-y-2">
                       {c.streams.map((s) => (
                         <details key={s.name} className="group rounded-lg border border-slate-200 bg-slate-50 p-3 transition hover:border-slate-300">
@@ -386,9 +569,9 @@ export default function Dashboard({ data }: { data: WaterData }) {
             )}
 
             {tab === "Export" && (() => {
-              const rows = FARMS.map((f) => { const c = consByFarm[f.id]; const rec = recommendation(c); return { farm: f.id, crop: f.crop, acres: f.acres, applied_gal_M: c.applied, crop_need_gal_C: c.req, crop_need_pm_gal: c.reqPm, etc_in_C: c.etc, etc_pm_in: c.etcPm, consensus: `${c.corroborate} corroborate / ${c.conflictN} conflict / ${c.silent} silent`, conflict: c.conflict, recommendation_R: rec.text, farmer_decision: decisions[f.id] ?? "—", verified_V: verified[f.id] ? "yes" : "NOT VERIFIED" }; });
+              const rows = FARMS.map((f) => { const c = consByFarm[f.id]; const rec = recommendation(c); const a = acctByFarm[f.id]; return { farm: f.id, crop: f.crop, acres: f.acres, period_days: a.days, period_applied_in_M_simulated: a.appliedIn, period_crop_et_in_C: a.cropEtIn, period_crop_et_pm_in: a.cropEtPm, period_irrigation_et_in_C: a.irrigEtIn, period_applied_not_consumed_in: a.notConsumedIn, applied_gal_M: c.applied, crop_need_gal_C: c.req, crop_need_pm_gal: c.reqPm, etc_in_C: c.etc, etc_pm_in: c.etcPm, consensus: `${c.corroborate} corroborate / ${c.conflictN} conflict / ${c.silent} silent`, conflict: c.conflict, recommendation_R: rec.text, farmer_decision: decisions[f.id] ?? "—", verified_V: verified[f.id] ? "yes" : "NOT VERIFIED" }; });
               const csv = [Object.keys(rows[0]).join(","), ...rows.map((r) => Object.values(r).map((v) => `"${v}"`).join(","))].join("\n");
-              const report = `GUARDIAN WATER BANK — RESEARCH PROTOTYPE\n${"=".repeat(60)}\nGenerated: ${TODAY} 08:45  ·  Mahomet Aquifer, E-Central IL\nData sources: ISWS Groundwater Monitoring Network (wells ${WELLS.map((w) => w.id).join(", ")}); NOAA ${NOAA_STATION}; SIMULATED farm meters (DEMO ONLY).\nFormulas: ETc = ET0(Hargreaves-Samani)[C] × Kc(FAO-56); gal = net_in × acres × 27,150.\n\n${rows.map((r) => `${r.farm}: applied ${r.applied_gal_M} [M] | need ${r.crop_need_gal_C} [C] | consensus ${r.consensus} | ${r.recommendation_R} [R] | decision ${r.farmer_decision} | ${r.verified_V}`).join("\n")}\n\nAudit chain records: ${ledger.length} (SHA-256, versioned).\nFor demonstration and scientific review only. No operational, regulatory, hydrologic, agricultural, or legal conclusion is asserted by this prototype.`;
+              const report = `${PILOT_NAME.toUpperCase()} — RESEARCH PROTOTYPE\n${PILOT_TAGLINE}\n${"=".repeat(60)}\nGenerated: ${TODAY} 08:45  ·  Phase 1: Mahomet Aquifer, E-Central IL\nAn independent, evidence-based agricultural research pilot. Not a water banking or water trading program.\nData sources: ISWS Groundwater Monitoring Network (wells ${WELLS.map((w) => w.id).join(", ")}); NOAA ${NOAA_STATION}; SIMULATED farm meters (DEMO ONLY).\nFormulas: ETc = ET0(Hargreaves-Samani)[C] × Kc(FAO-56); gal = net_in × acres × 27,150.\n\nWATER ACCOUNTING (last ${acctDays} days) — applied vs ET consumptive use. The difference is NOT counted as groundwater savings.\n${rows.map((r) => `${r.farm}: applied ${r.period_applied_in_M_simulated} in [M, simulated] | crop ET ${r.period_crop_et_in_C} ± ${r.period_crop_et_pm_in} in [C] | irrigation-supplied ET ${r.period_irrigation_et_in_C} in [C] | applied not consumed ${r.period_applied_not_consumed_in} in (fate unknown)`).join("\n")}\n\nGO / NO-GO: Water assessment NOT YET EVALUABLE · Energy assessment NOT YET EVALUABLE · Economic feasibility NOT YET EVALUABLE.\nModeled pumping energy (last ${acctDays} days, all farms): ${energy.kwh} kWh ≈ $${energy.cost} [E] — rests on simulated pumping and unverified assumptions (drawdown ${DEFAULT_ENERGY.drawdownFt} ft, pressure ${DEFAULT_ENERGY.pressureFt} ft, efficiency ${DEFAULT_ENERGY.plantEfficiency}, $${DEFAULT_ENERGY.pricePerKwh}/kWh).\nYield is reported with uncertainty and excluded from pass/fail. A wet season is reported as Inconclusive, not No-Go.\n\nDAILY RECOMMENDATIONS\n${rows.map((r) => `${r.farm}: applied ${r.applied_gal_M} [M] | need ${r.crop_need_gal_C} [C] | consensus ${r.consensus} | ${r.recommendation_R} [R] | decision ${r.farmer_decision} | ${r.verified_V}`).join("\n")}\n\nAudit chain records: ${ledger.length} (SHA-256, versioned).\nFor demonstration and scientific review only. No operational, regulatory, hydrologic, agricultural, or legal conclusion is asserted by this prototype.`;
               return (
                 <section className="space-y-4">
                   <h3 className="text-lg font-semibold text-slate-900">Evidence package export</h3>
@@ -399,8 +582,8 @@ export default function Dashboard({ data }: { data: WaterData }) {
                     </table>
                   </div>
                   <div className="flex flex-wrap gap-3">
-                    <button onClick={() => download("guardian_water_bank_evidence.csv", csv, "text/csv")} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"><Icon name="download" className="h-4 w-4" />Evidence package (CSV)</button>
-                    <button onClick={() => download("guardian_water_bank_report.txt", report)} className="flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"><Icon name="download" className="h-4 w-4" />Evidence report (TXT)</button>
+                    <button onClick={() => download("farm_water_energy_pilot_evidence.csv", csv, "text/csv")} className="flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"><Icon name="download" className="h-4 w-4" />Evidence package (CSV)</button>
+                    <button onClick={() => download("farm_water_energy_pilot_report.txt", report)} className="flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100"><Icon name="download" className="h-4 w-4" />Evidence report (TXT)</button>
                   </div>
                   <p className="text-xs text-slate-400">PDF hook: swap the TXT writer for a server route + a PDF lib in production for a branded, signed package.</p>
                 </section>
@@ -421,7 +604,7 @@ export default function Dashboard({ data }: { data: WaterData }) {
           </div>
         )}
 
-        <footer className="border-t border-slate-200 px-6 py-4 text-center text-xs text-slate-400">Guardian Water Bank · RESEARCH PROTOTYPE · Every drop has a reason. Every decision has a record. · For demonstration &amp; scientific review only.</footer>
+        <footer className="border-t border-slate-200 px-6 py-4 text-center text-xs text-slate-400">{PILOT_NAME} · Phase 1: Mahomet Aquifer · RESEARCH PROTOTYPE · {PILOT_TAGLINE} · Independent agricultural research pilot, not a water banking or trading program · For demonstration &amp; scientific review only.</footer>
       </div>
     </div>
   );
